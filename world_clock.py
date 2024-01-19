@@ -2,184 +2,230 @@ import datetime
 import pytz
 import tkinter as tk
 from tkinter import ttk
-import matplotlib.pyplot as plt
 import requests
-from twelvedata import TDClient
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 import os
 from dotenv import load_dotenv
+from twelvedata import TDClient
 
+# Ensure environment variables are loaded
 load_dotenv()
 
-# Twelve Data API key
-API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
-# Check if the API key is available
-if API_KEY is None:
-    raise ValueError("API key not found. Please set the TWELVE_DATA_API_KEY environment variable.")
-# Function to fetch ETF data
-def get_etf_data(symbol):
-    try:
-        client = TDClient(apikey=API_KEY)
-        response = client.time_series(
-            symbol=symbol,
-            interval="1min",
-            outputsize=30  # Number of data points for the chart
-        )
-        data = response.as_json()
-        return data
-    except Exception as e:
-        print(f"Error fetching ETF data for {symbol}: {str(e)}")
-        return []
+TWELVE_DATA_API_KEY = os.getenv('TWELVE_DATA_API_KEY')
+BITCOIN_PRICE_URL = "https://api.coindesk.com/v1/bpi/currentprice/BTC.json"
 
-# Function to update the ETF chart
-def update_etf_chart(symbol):
-    data = get_etf_data(symbol)
 
-    if data:
-        times = [point['datetime'] for point in data]
-        values = [point['close'] for point in data]
-        plt.plot(times, values, label=symbol)
-        plt.xlabel('Time')
-        plt.ylabel('Closing Price')
-        plt.title(f'{symbol} Price Chart')
-        plt.legend()
-        plt.show()
+class MarketsTrackerApp:
+    def __init__(self, master):
+        self.master = master
+        self.master.title("MarketsTracker")
+        self.master.geometry('800x600+50+50')
+        self.timezones = {
+            "New York": "America/New_York",
+            "London": "Europe/London",
+            "Tokyo": "Asia/Tokyo",
+            "Hong Kong": "Asia/Hong_Kong",
+            "Sydney": "Australia/Sydney",
+            "Paris": "Europe/Paris",
+            "Los Angeles": "America/Los_Angeles",
+            "Dubai": "Asia/Dubai"
+        }
+        self.check_api_key()
+        self.etf_symbols = ['IBIT', 'FBTC', 'BITB', 'ARKB', 'EZBC', 'BTCO', 'Other1', 'Other2']
+        self.etf_buttons = {}
+        self.etf_change_labels = {}
+        self.previous_etf_prices = {}
+        self.setup_ui()
+        self.master.after(1000, self.update_all)
 
-# Function to update the clock labels, countdown timers, and ETF prices
-def update_clocks():
-    current_datetime = datetime.datetime.now()
-    current_date = current_datetime.date()
+    def check_api_key(self):
+        if TWELVE_DATA_API_KEY is None:
+            raise ValueError("Please set the TWELVE_DATA_API_KEY environment variable.")
 
-    # Update World Clocks
-    for city, timezone in timezones.items():
-        current_time = current_datetime.astimezone(pytz.timezone(timezone)).time()
-        time_label = clock_labels[city]
-        time_label.config(text=current_time.strftime("%H:%M:%S"))
+    def setup_ui(self):
+        self.create_always_on_top_toggle(row=0, column=0)
+        self.create_timezones(row=1, column=0)
+        self.create_local_time_label(row=len(self.timezones)+2, column=0)
+        self.create_bitcoin_price_label(row=len(self.timezones)+3, column=0)
+        self.create_city_dropdown(row=len(self.timezones)+4, column=0)
+        self.create_chart_frame(row=1, column=12)
+        self.create_etf_buttons(row=len(self.timezones)+2, column=14)
 
-        target_datetime = datetime.datetime.combine(current_date, target_time)
-        if current_time > target_time:
-            target_datetime += datetime.timedelta(days=1)
+    def create_timezones(self, row=0, column=0):
+        self.clock_labels = {}
+        self.countdown_labels = {}
+        self.target_time = datetime.time(8, 0, 0)
+        row = 1
+            
+        for city, timezone in self.timezones.items():
+            label = tk.Label(self.master, text=city, font=("Arial", 16, "bold"))
+            label.grid(row=row, column=0, padx=(10, 2), pady=5, sticky='w')
 
-        remaining_time = target_datetime - datetime.datetime.combine(current_date, current_time)
-        remaining_time -= datetime.timedelta(microseconds=remaining_time.microseconds)
-        countdown_label = countdown_labels[city]
+            clock_label = tk.Label(self.master, text="", font=("Arial", 14, "bold"))
+            clock_label.grid(row=row, column=1, padx=2, pady=5)
+            self.clock_labels[city] = clock_label
 
-        if remaining_time.total_seconds() / 3600 <= 1:
-            countdown_label.config(text=str(remaining_time))
-            if remaining_time.total_seconds() / 60 <= 30:
-                countdown_label.config(fg="red")
-            else:
-                countdown_label.config(fg="black")
+            countdown_label = tk.Label(self.master, text="", font=("Arial", 14, "bold"))
+            countdown_label.grid(row=row, column=2, padx=2, pady=5)
+            self.countdown_labels[city] = countdown_label
+
+            row += 1
+
+    def create_city_dropdown(self, row=0, column=0):
+        self.city_combo = ttk.Combobox(self.master, values=list(self.timezones.keys()), state="readonly")
+        self.city_combo.grid(row=row, column=column, columnspan=3, padx=10, pady=10, sticky='w')
+        self.city_combo.current(0)
+
+    def create_local_time_label(self, row=8, column=0):
+        self.local_time_label = tk.Label(self.master, text="Local Time: ", font=("Arial", 16))
+        self.local_time_label.grid(row=row, column=column, columnspan=3, padx=10, pady=10, sticky='w')
+
+    def create_bitcoin_price_label(self, row=8, column=0):
+        self.bitcoin_price_label = tk.Label(self.master, text="Bitcoin Price: ", font=("Arial", 16))
+        self.bitcoin_price_label.grid(row=row, column=column, columnspan=3, padx=10, pady=10, sticky='w')
+
+    def create_always_on_top_toggle(self, row=0, column=0):
+        self.always_on_top_button = tk.Button(self.master, text="Enable Always on Top", command=self.toggle_always_on_top)
+        self.always_on_top_button.grid(row=row, column=column, columnspan=3, padx=10, pady=10)
+
+    def toggle_always_on_top(self):
+        topmost = not self.master.attributes("-topmost")
+        self.always_on_top_button.config(text="Disable Always on Top" if topmost else "Enable Always on Top")
+        self.master.attributes("-topmost", topmost)
+
+    def create_etf_buttons(self, row, column, max_frame_width=300):
+        button_frame = tk.Frame(self.master, width=max_frame_width)
+        button_frame.grid(row=row, column=column, padx=10, pady=10, sticky="nsew")
+
+        for i in range(3):
+            button_frame.columnconfigure(i, weight=1)
+        num_rows = (len(self.etf_symbols) + 2) // 3
+
+        for i, symbol in enumerate(self.etf_symbols):
+            button_row = i // 3
+            button_column = i % 3
+            button = tk.Button(button_frame, text=f"{symbol} Price", font=("Arial", 12),
+                               command=lambda s=symbol: self.update_etf_chart(s), width=15)
+            button.grid(row=button_row, column=button_column, padx=5, pady=5, sticky="nsew")
+            self.etf_buttons[symbol] = button
+
+            change_label = tk.Label(button_frame, text="", font=("Arial", 9))
+            change_label.grid(row=button_row + 1, column=button_column, padx=5, pady=1)
+            self.etf_change_labels[symbol] = change_label
+
+        for i in range(num_rows):
+            button_frame.grid_rowconfigure(i, weight=1)
+
+    def create_chart_frame(self, row, column, left_margin=40):
+        self.chart_frame = tk.Frame(self.master)
+        self.chart_frame.grid(row=row, column=column, rowspan=len(self.timezones)+1, columnspan=6, sticky='nsew', padx=(left_margin, 10), pady=10)
+
+        self.fig = Figure(figsize=(5, 4), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.chart_frame)
+        self.canvas.get_tk_widget().grid(row=row, column=column, rowspan=len(self.timezones)+1, columnspan=6, sticky='nsew')
+
+    def update_all(self):
+        self.update_clocks()
+        self.update_bitcoin_price()
+        self.master.after(1000, self.update_all)
+
+    # def update_etf_chart(self, symbol):
+    #     data = self.get_etf_data(symbol)
+    #     self.fig.clf()
+
+    #     if data:
+    #         times = [datetime.datetime.strptime(point['datetime'], '%Y-%m-%dT%H:%M:%S%z') for point in data]
+    #         values = [float(point['close']) for point in data]
+
+    #         if symbol not in self.previous_etf_prices:
+    #             self.previous_etf_prices[symbol] = values[0]
+
+    #         percent_change = ((values[-1] - self.previous_etf_prices[symbol]) / self.previous_etf_prices[symbol]) * 100
+    #         self.etf_change_labels[symbol].config(text=f"{percent_change:+.2f}%")
+    #         self.previous_etf_prices[symbol] = values[-1]
+
+    #         ax = self.fig.add_subplot(111)
+    #         ax.plot(times, values, label=symbol)
+    #         ax.set_xlabel('Time')
+    #         ax.set_ylabel('Price USD')
+    #         ax.legend()
+    #         ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    #         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+    #         self.fig.autofmt_xdate()
+    #     else:
+    #         ax = self.fig.add_subplot(111)
+    #         ax.text(0.5, 0.5, 'No Data Available', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+
+    #     self.canvas.draw()
+
+    def update_etf_chart(self, symbol):
+        data = self.get_etf_data(symbol)
+        self.fig.clf()
+
+        if data:
+            # Adjust the strptime format to match the data being read
+            times = [datetime.datetime.strptime(point['datetime'], '%Y-%m-%d %H:%M:%S') for point in data]
+            values = [float(point['close']) for point in data]
+
+            if symbol not in self.previous_etf_prices:
+                self.previous_etf_prices[symbol] = values[0]
+
+            percent_change = ((values[-1] - self.previous_etf_prices[symbol]) / self.previous_etf_prices[symbol]) * 100
+            self.etf_change_labels[symbol].config(text=f"{percent_change:+.2f}%")
+            self.previous_etf_prices[symbol] = values[-1]
+
+            ax = self.fig.add_subplot(111)
+            ax.plot(times, values, label=symbol)
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Price USD')
+            ax.legend()
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+            self.fig.autofmt_xdate()
         else:
-            countdown_label.config(text="")
+            ax = self.fig.add_subplot(111)
+            ax.text(0.5, 0.5, 'No Data Available', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
 
-    selected_city = city_combo.get()
-    if selected_city in timezones:
-        selected_timezone = timezones[selected_city]
-        local_timezone = pytz.timezone(selected_timezone)
-        local_time = current_datetime.astimezone(local_timezone).time()
-        local_time_label.config(text="Local Time: " + local_time.strftime("%H:%M:%S"))
+        self.canvas.draw()
 
-    bitcoin_price = get_bitcoin_price()
-    bitcoin_price_label.config(text="Bitcoin Price: " + bitcoin_price)
+        def get_etf_data(self, symbol):
+            try:
+                td = TDClient(apikey=TWELVE_DATA_API_KEY)
+                ts = td.time_series(symbol=symbol, interval="1min", outputsize=5, timezone="America/New_York").as_json()
+                return ts
+            except Exception as e:
+                print(f"Error fetching ETF data for {symbol}: {str(e)}")
+                return None
 
-    root.after(1000, update_clocks)
+    def update_clocks(self):
+        current_datetime = datetime.datetime.now(pytz.utc)
+        for city, timezone in self.timezones.items():
+            tz = pytz.timezone(timezone)
+            current_time = current_datetime.astimezone(tz)
+            self.clock_labels[city].config(text=current_time.strftime("%H:%M:%S"))
+            target_datetime = datetime.datetime.combine(current_datetime, self.target_time).astimezone(tz)
+            if current_time.time() > self.target_time:
+                target_datetime += datetime.timedelta(days=1)
+            remaining_time = int((target_datetime - current_time).total_seconds())
+            countdown_text = f"{remaining_time//3600:02d}:{(remaining_time%3600)//60:02d}:{remaining_time%60:02d}"
+            self.countdown_labels[city].config(text=countdown_text if remaining_time > 0 else "")
 
-# Function to fetch live Bitcoin price
-def get_bitcoin_price():
-    try:
-        response = requests.get("https://api.coindesk.com/v1/bpi/currentprice/BTC.json")
-        data = response.json()
-        price = data["bpi"]["USD"]["rate"]
-        return price
-    except Exception as e:
-        print("Error fetching Bitcoin price:", str(e))
-        return "N/A"
+    def update_bitcoin_price(self):
+        try:
+            response = requests.get(BITCOIN_PRICE_URL)
+            data = response.json()
+            price = data['bpi']['USD']['rate']
+            self.bitcoin_price_label.config(text=f"Bitcoin Price: {price}")
+        except Exception as e:
+            print("Error fetching Bitcoin price:", str(e))
+            self.bitcoin_price_label.config(text="Bitcoin Price: Error fetching data")
 
-# Function to toggle "always on top" feature
-def toggle_always_on_top():
-    root.attributes("-topmost", not root.attributes("-topmost"))
-    if root.attributes("-topmost"):
-        always_on_top_button.config(text="Disable Always on Top")
-    else:
-        always_on_top_button.config(text="Enable Always on Top")
 
-# Create the Tkinter window
-root = tk.Tk()
-root.title("MarketsTracker")
-
-# Create a dictionary to store the clock labels and countdown labels
-clock_labels = {}
-countdown_labels = {}
-
-# Define the timezones and target times for the countdown
-timezones = {
-    "New York": "America/New_York",
-    "London": "Europe/London",
-    "Tokyo": "Asia/Tokyo",
-    "Hong Kong": "Asia/Hong_Kong",
-    "Sydney": "Australia/Sydney",
-    "Paris": "Europe/Paris",
-    "Los Angeles": "America/Los_Angeles",
-    "Dubai": "Asia/Dubai"
-}
-target_time = datetime.time(8, 0, 0)
-
-# Create and place the clock labels and countdown labels on the window
-row = 0
-for city in timezones.keys():
-    label = tk.Label(root, text=city, font=("Arial", 24))
-    label.grid(row=row, column=0, padx=10, pady=10)
-    clock_label = tk.Label(root, text="", font=("Arial", 24, "bold"))
-    clock_label.grid(row=row, column=1, padx=10, pady=10)
-    clock_labels[city] = clock_label
-    countdown_label = tk.Label(root, text="", font=("Arial", 24, "bold"))
-    countdown_label.grid(row=row, column=2, padx=10, pady=10)
-    countdown_labels[city] = countdown_label
-    row += 1
-
-# Create a combo box to select the city
-city_combo = ttk.Combobox(root, values=list(timezones.keys()), font=("Arial", 16))
-city_combo.current(0)
-city_combo.grid(row=row, column=0, columnspan=3, padx=10, pady=10)
-
-# Create a label to display the local time
-local_time_label = tk.Label(root, text="Local Time: ", font=("Arial", 16))
-local_time_label.grid(row=row+1, column=0, columnspan=3, padx=10, pady=10)
-
-# Create a label to display the Bitcoin price
-bitcoin_price_label = tk.Label(root, text="Bitcoin Price: ", font=("Arial", 16))
-bitcoin_price_label.grid(row=row+2, column=0, columnspan=3, padx=10, pady=10)
-
-# Create a button to toggle the "always on top" feature
-always_on_top_button = tk.Button(root, text="Enable Always on Top", command=toggle_always_on_top)
-always_on_top_button.grid(row=row+3, column=0, columnspan=3, padx=10, pady=10)
-
-# //
-# Create and place the ETF labels on the window
-etf_buttons = {}  # Use buttons instead of labels
-etf_symbols = ['IBIT', 'FBTC', 'BITB', 'ARKB', 'EZBC', 'BTCO', 'Other1', 'Other2']
-# etf_symbols = ['IBIT', 'FBTC']
-
-row += 4
-# Create clickable buttons for ETF symbols
-for symbol in etf_symbols:
-    button = tk.Button(root, text=f"{symbol} Price", font=("Arial", 16), command=lambda s=symbol: update_etf_chart(s))
-    button.grid(row=row, column=etf_symbols.index(symbol), padx=2, pady=2)
-    etf_buttons[symbol] = button
-    # row += 1j
-
-# Create a combo box to select the ETF symbol
-# etf_symbol_combo = ttk.Combobox(root, values=etf_symbols, font=("Arial", 16))
-# etf_symbol_combo.current(0)
-# etf_symbol_combo.grid(row=row+1, column=0, columnspan=len(etf_symbols), padx=10, pady=10)
-
-# # Create a button to update the ETF chart
-# update_etf_chart_button = tk.Button(root, text="Update ETF Chart", command=lambda: update_etf_chart(etf_symbol_combo.get()))
-# update_etf_chart_button.grid(row=row+1, column=0, columnspan=len(etf_symbols), padx=10, pady=10)
-
-# Start updating the clock labels and countdown labels
-update_clocks()
-
-# Run the Tkinter event loop
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MarketsTrackerApp(root)
+    root.mainloop()
